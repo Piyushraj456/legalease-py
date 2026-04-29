@@ -5,7 +5,6 @@ import re
 from keywords import LEGAL_KEYWORDS
 from fastapi import Body
 import requests
-import spacy
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Union
@@ -26,11 +25,6 @@ import google.generativeai as genai
 MAX_FILE_SIZE = 5 * 1024 * 1024  
 TRIVIAL_WORDS = {"law", "agreement", "will", "document", "party", "shall"}
 SUPPORTED_FILE_TYPES = ['.pdf']
-
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    raise RuntimeError("⚠️ spaCy model not found. Run: python -m spacy download en_core_web_sm")
 
 
 load_dotenv()
@@ -193,11 +187,8 @@ class DocumentStructureParser:
 # Smart Keyword Detector
 # -------------------------
 import re
-import spacy
 from typing import List, Dict, Tuple, Optional
 
-# Load spaCy model once
-nlp = spacy.load("en_core_web_sm")
 
 class SmartKeywordDetector:
     def __init__(self):
@@ -267,30 +258,41 @@ class SmartKeywordDetector:
         return results
 
     def _extract_entities(self, text: str) -> Dict:
-        doc = nlp(re.sub(r"\s+", " ", text))
-        parties, dates, money, locations, laws, numbers = [], [], [], [], [], []
-
-        for ent in doc.ents:
-            if ent.label_ in ["ORG", "PERSON"] and len(ent.text.strip()) > 2:
-                parties.append(ent.text.strip())
-            elif ent.label_ == "DATE":
-                dates.append(ent.text.strip())
-            elif ent.label_ == "MONEY":
-                money.append(ent.text.strip())
-            elif ent.label_ == "GPE":
-                locations.append(ent.text.strip())
-            elif ent.label_ == "LAW":
-                laws.append(ent.text.strip())
-            elif ent.label_ == "CARDINAL":
-                numbers.append(ent.text.strip())
-
+        # Dates: e.g. 01/01/2024, January 1, 2024, 1st day of January 2024
+        dates = re.findall(
+            r"\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}"
+            r"|\w+ \d{1,2},?\s*\d{4}"
+            r"|\d{1,2}(?:st|nd|rd|th) day of \w+ \d{4})\b",
+            text, re.I
+        )
+        # Money: $1,000 / $500.00 / USD 5,000
+        money = re.findall(
+            r"(?:\$[\d,]+(?:\.\d{2})?|USD\s*[\d,]+(?:\.\d{2})?|[\d,]+(?:\.\d{2})?\s*(?:dollars|USD))\b",
+            text, re.I
+        )
+        # Laws/Acts: e.g. "Securities Act", "GDPR", "Section 7 of ..."
+        laws = re.findall(
+            r"\b(?:[A-Z][a-z]+ (?:Act|Code|Law|Regulation|Statute|Ordinance|Amendment)\b"
+            r"|(?:GDPR|HIPAA|CCPA|SOX|FCPA|AML|KYC)\b"
+            r"|(?:\d+\s+U\.?S\.?C\.?\s+§?\s*\d+))\b",
+            text
+        )
+        # Percentages and cardinal numbers
+        numbers = re.findall(r"\b\d+(?:\.\d+)?%?\b", text)
+        # Parties: Capitalized multi-word names (heuristic for org/person names)
+        parties = re.findall(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b", text)
+        # Jurisdictions: State/country names commonly in legal docs
+        jurisdictions = re.findall(
+            r"\b(?:New York|California|Texas|Delaware|Florida|England|India|United States|U\.S\.A?\.?)\b",
+            text
+        )
         return {
-            "parties": list(set(parties)),
+            "parties": list(set(parties))[:10],
             "dates": list(set(dates)),
             "money": list(set(money)),
-            "jurisdictions": list(set(locations)),
+            "jurisdictions": list(set(jurisdictions)),
             "laws": list(set(laws)),
-            "numbers": list(set(numbers)),
+            "numbers": list(set(numbers))[:10],
         }
 
     def _build_pattern(self, keyword: str) -> re.Pattern:
@@ -571,7 +573,7 @@ async def health_check():
     health_status = {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "spacy_model": "en_core_web_sm loaded",
+        "entity_extraction": "regex-based (no spacy)",
         "max_file_size_mb": MAX_FILE_SIZE / (1024 * 1024),
         "supported_formats": SUPPORTED_FILE_TYPES,
         "documents_in_storage": len(document_storage)
